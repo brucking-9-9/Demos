@@ -184,21 +184,45 @@ pub fn read_demo(path: &str) -> Result<Demo> {
     ))
 }
 
-/// Find all .dem files in the directory at `dir_path`
-/// and return their file stem (name without extension)
+/// Find all .dem files in the directory at `dir_path`, including those in
+/// subdirectories, and return their paths relative to `dir_path` without the
+/// extension (e.g. `2026/10/04/match` for `<dir_path>/2026/10/04/match.dem`).
+///
+/// Symlinks (to files or directories) are skipped so that a tree which links
+/// to its own demos under another name does not list them twice.
+/// Subdirectories that cannot be read are logged and skipped; only the root
+/// directory failing to read is an error.
 pub fn read_demo_names_in_directory(dir_path: &str) -> Result<Vec<String>> {
-    let dir_iterator = read_dir(dir_path)?;
+    let root = Path::new(dir_path);
 
     let mut demos = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
 
-    for dir_entry in dir_iterator
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_file()))
-    {
-        let path = dir_entry.path();
-        if path.extension() == Some(OsStr::new("dem")) {
-            if let Some(stem) = path.file_stem().and_then(OsStr::to_str) {
-                demos.push(stem.into());
+    while let Some(dir) = pending.pop() {
+        let dir_iterator = match read_dir(&dir) {
+            Ok(dir_iterator) => dir_iterator,
+            Err(error) if dir == root => return Err(error.into()),
+            Err(error) => {
+                warn!("Skipping unreadable directory {}: {error}", dir.display());
+                continue;
+            }
+        };
+
+        for dir_entry in dir_iterator.flatten() {
+            // `DirEntry::file_type` does not follow symlinks,
+            // so a symlink is neither a dir nor a file here.
+            let Ok(file_type) = dir_entry.file_type() else {
+                continue;
+            };
+            let path = dir_entry.path();
+
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if file_type.is_file() && path.extension() == Some(OsStr::new("dem")) {
+                let relative = path.strip_prefix(root).unwrap_or(&path);
+                if let Some(name) = relative.with_extension("").to_str() {
+                    demos.push(name.into());
+                }
             }
         }
     }
